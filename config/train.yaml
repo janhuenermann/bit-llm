@@ -2,3 +2,4 @@ defaults:
   - model: small
 
 batch_size: 4
+chunk_size: 64

@@ -1,5 +1,6 @@
 import re
 from typing import Tuple
+import numpy as np
 
 import torch
 from lightning.pytorch import LightningModule
@@ -10,24 +11,49 @@ from torch.nn import functional as F
 
 
 class BitLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(self, in_features: int, out_features: int, norm: bool = True):
         super().__init__()
         self.eps = 1e-5
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        self.norm = norm
 
     def forward(self, x):
-        # Quantize the weights to -1, 0, 1
-        Wn = self.weight / (self.weight.abs().mean() + self.eps)
-        Wq = (torch.round(Wn).clamp(-1.0, 1.0) - Wn).detach() + Wn
-
-        # Matmul
-        x = F.linear(x, Wq)
-
+        x = F.linear(x, self.get_quantized_weight())
         # Re-scale the output to 8 bit
         scale = self.weight.size(1)
         Q_b = 2 ** (8 - 1)
-        xn = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
-        return xn
+        x = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
+        return x
+
+    def get_quantized_weight(self):
+        # Quantize the weights to -1, 0, 1
+        Wn = self.weight / (self.weight.abs().mean() + self.eps)
+        Wq = torch.round(Wn).clamp(-1.0, 1.0) + (Wn - Wn.detach())
+        return Wq
+
+    def encode(self):
+        """
+        Pack the quantized weights in 1.6 bit, i.e. 5 values per byte.
+        """
+        powers = 3 ** torch.arange(5, device=self.weight.device)
+        Wq = 1 + self.get_quantized_weight().detach().flatten()
+        n5 = len(Wq) - (len(Wq) % 5)
+        data = torch.sum(Wq[:n5].reshape(-1, 5) * powers, -1).to(torch.uint8)
+        if len(Wq) % 5 != 0:
+            data = torch.cat([data, torch.sum(Wq[n5:] * powers[: len(Wq) % 5]).to(torch.uint8).unsqueeze(0)])
+        return data
+
+    def load_quantized(self, data):
+        """
+        Load the quantized weights from the packed data.
+        """
+        powers = 3 ** torch.arange(5)
+        Wq = torch.zeros(self.weight.data.numel(), dtype=torch.uint8)
+        n5 = len(Wq) - (len(Wq) % 5)
+        Wq[:n5] = (data[:n5 // 5, None] // powers).flatten()
+        if len(Wq) % 5 != 0:
+            Wq[n5:] = data[-1, None] // 3 ** powers[: len(Wq) % 5]
+        return (Wq.view(self.weight.data.shape) % 3).to(self.weight.dtype) - 1.0
 
 
 class LlamaAttention(nn.Module):
@@ -129,7 +155,7 @@ class Llama(LightningModule):
         )
         self.norm = LlamaNorm(hidden_dim)
         self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
-        self.lm_head = BitLinear(hidden_dim, vocab_size)
+        self.lm_head = BitLinear(hidden_dim, vocab_size, norm=False)
 
         if should_init_weights:
             self.apply(_weight_init)
@@ -161,6 +187,16 @@ class Llama(LightningModule):
             optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.05, verbose=False
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
+
+    @torch.inference_mode()
+    def generate(self, prompt, max_len=50):
+        ids = prompt
+        for _ in range(max_len):
+            x = self.embed_tokens(ids)
+            x = self.forward(x)
+            logits = self.lm_head(x[:, -1])
+            ids = torch.cat([ids, logits.argmax(-1).unsqueeze(-1)], dim=-1)
+        return ids
 
     def _load_weights_hook(self, state_dict, prefix, *args):
         # Remove `model.*` prefix from the state_dict
@@ -218,3 +254,14 @@ def _compute_rotary(
 def _weight_init(module: nn.Module):
     if isinstance(module, (BitLinear, nn.Embedding)):
         nn.init.normal_(module.weight, std=0.02)
+
+
+def get_quantized_state_dict(model: Llama):
+    quantized_state_dict = {}
+    for n, m in model.named_modules():
+        if isinstance(m, BitLinear):
+            quantized_state_dict[n + ".weight"] = m.encode()
+        elif isinstance(m, nn.Embedding):
+            quantized_state_dict[n + ".weight"] = m.weight.data.detach().half()
+    quantized_state_dict = {k: v.cpu().numpy() for k, v in quantized_state_dict.items()}
+    return quantized_state_dict
