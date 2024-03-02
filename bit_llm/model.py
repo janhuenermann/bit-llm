@@ -31,6 +31,7 @@ class BitLinear(nn.Module):
         Wq = torch.round(Wn).clamp(-1.0, 1.0) + (Wn - Wn.detach())
         return Wq
 
+    @torch.no_grad()
     def encode(self):
         """
         Pack the quantized weights in 1.6 bit, i.e. 5 values per byte.
@@ -38,11 +39,12 @@ class BitLinear(nn.Module):
         powers = 3 ** torch.arange(5, device=self.weight.device)
         Wq = 1 + self.get_quantized_weight().detach().flatten()
         n5 = len(Wq) - (len(Wq) % 5)
-        data = torch.sum(Wq[:n5].reshape(-1, 5) * powers, -1).to(torch.uint8)
+        data = torch.sum(Wq[:n5].reshape(-1, 5) * powers, dim=-1, dtype=torch.uint8)
         if len(Wq) % 5 != 0:
-            data = torch.cat([data, torch.sum(Wq[n5:] * powers[: len(Wq) % 5]).to(torch.uint8).unsqueeze(0)])
+            data = torch.cat([data, torch.sum(Wq[n5:] * powers[: len(Wq) % 5], dtype=torch.uint8).unsqueeze(0)])
         return data
 
+    @torch.no_grad()
     def load_quantized(self, data):
         """
         Load the quantized weights from the packed data.

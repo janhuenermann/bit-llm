@@ -5,6 +5,7 @@ import numpy as np
 import hydra
 from lightning import pytorch as pl
 from transformers import LlamaForCausalLM, LlamaTokenizerFast
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from bit_llm.data import DataModule
 from bit_llm.callbacks.generation import GenerationCallback
@@ -37,6 +38,7 @@ def main(cfg):
         logger=pl.loggers.WandbLogger(project="bit-llm"),
         log_every_n_steps=50,
         default_root_dir="~/logs",
+        enable_checkpointing=False,
         callbacks=[
             GenerationCallback(tokenizer=tokenizer),
         ]
