@@ -1,0 +1,6 @@
+_target_: bit_llm.model.Llama
+
+hidden_dim: 2048
+num_layers: 24
+num_attention_heads: 16
+intermediate_size: 8192

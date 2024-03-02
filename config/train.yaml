@@ -1,0 +1,4 @@
+defaults:
+  - model: small
+
+batch_size: 4

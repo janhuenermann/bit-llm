@@ -1,0 +1,4 @@
+*.egg-info
+outputs
+__pycache__
+lightning_logs
