@@ -6,6 +6,7 @@ import hydra
 from lightning import pytorch as pl
 from transformers import LlamaForCausalLM, LlamaTokenizerFast
 from lightning.pytorch.callbacks import ModelCheckpoint
+import torch
 
 from bit_llm.data import DataModule
 from bit_llm.callbacks.generation import GenerationCallback
@@ -17,6 +18,8 @@ os.environ["CURL_CA_BUNDLE"] = ""
 
 @hydra.main(config_path="../config", config_name="train", version_base="1.2")
 def main(cfg):
+    torch.set_float32_matmul_precision("high")
+
     model_name = "HuggingFaceTB/cosmo-1b"
     tokenizer = LlamaTokenizerFast.from_pretrained(model_name)
     base_model = LlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True)
@@ -34,7 +37,7 @@ def main(cfg):
         accelerator="auto",
         max_steps=1000,
         precision="bf16-true",
-        gradient_clip_val=1.0,
+        gradient_clip_val=5.0,
         logger=pl.loggers.WandbLogger(project="bit-llm"),
         log_every_n_steps=50,
         default_root_dir="~/logs",
@@ -44,7 +47,7 @@ def main(cfg):
         ]
     )
 
-    data_module = DataModule(tokenizer=tokenizer, batch_size=cfg.batch_size, chunk_size=cfg.chunk_size)
+    data_module = DataModule(tokenizer=tokenizer, batch_size=cfg.batch_size)
 
     trainer.fit(model, data_module)
 

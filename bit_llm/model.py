@@ -176,10 +176,11 @@ class Llama(LightningModule):
 
     def training_step(self, batch):
         ids = batch["input_ids"]
+        labels = batch["labels"]
         x = self.embed_tokens(ids)
         x = self.forward(x)
         logits = self.lm_head(x[:, :-1])
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), ids[:, 1:].flatten())
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels[:, 1:].flatten(), ignore_index=-1)
         self.log("loss", loss, prog_bar=True)
         return loss
 
