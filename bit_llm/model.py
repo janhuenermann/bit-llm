@@ -12,22 +12,21 @@ from torch.nn import functional as F
 class BitLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
+        self.eps = 1e-5
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
 
     def forward(self, x):
-        eps = 1e-5
+        # Quantize the weights to -1, 0, 1
+        Wn = self.weight / (self.weight.abs().mean() + self.eps)
+        Wq = (torch.round(Wn).clamp(-1.0, 1.0) - Wn).detach() + Wn
 
-        Wn = self.weight / (self.weight.abs().mean() + eps)
-        Wq = torch.round(Wn).clamp(-1.0, 1.0) + (Wn - Wn.detach())
-
+        # Matmul
         x = F.linear(x, Wq)
 
-        # scale = x.abs().max() + eps
+        # Re-scale the output to 8 bit
         scale = self.weight.size(1)
-
         Q_b = 2 ** (8 - 1)
         xn = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
-
         return xn
 
 
@@ -113,11 +112,14 @@ class Llama(LightningModule):
         num_layers: int,
         num_attention_heads: int,
         intermediate_size: int,
+        lr: float = 1e-4,
         vocab_size: int = 32000,
         max_sequence_length: int = 2048,
         should_init_weights: bool = True,
     ):
         super().__init__()
+
+        self.lr = lr
 
         self.layers = nn.ModuleList(
             [
@@ -145,17 +147,20 @@ class Llama(LightningModule):
         return self.norm(x)
 
     def training_step(self, batch):
-        breakpoint()
         ids = batch["input_ids"]
         x = self.embed_tokens(ids)
         x = self.forward(x)
         logits = self.lm_head(x[:, :-1])
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), ids[:, 1:].flatten())
+        self.log("loss", loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-5, weight_decay=0.1)
-        return optimizer
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.1)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.05, verbose=False
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
 
     def _load_weights_hook(self, state_dict, prefix, *args):
         # Remove `model.*` prefix from the state_dict

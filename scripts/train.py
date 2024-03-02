@@ -1,4 +1,3 @@
-from functools import partial
 import os
 
 import hydra
@@ -74,13 +73,14 @@ def main(cfg):
     model = hydra.utils.instantiate(cfg.model, should_init_weights=False)
     model.load_state_dict(base_model.state_dict(), strict=True)
 
-    out = model(torch.randn((3, 128, 2048)))
-    print(out.shape)
-    print(cfg)
-
     trainer = pl.Trainer(
         accelerator="auto",
-        max_steps=10_000,
+        max_steps=1000,
+        precision="bf16-true",
+        gradient_clip_val=1.0,
+        logger=pl.loggers.WandbLogger(project="bit-llm"),
+        log_every_n_steps=50,
+        default_root_dir="logs",
     )
 
     data_module = DataModule(tokenizer_name=model_name, batch_size=cfg.batch_size)
