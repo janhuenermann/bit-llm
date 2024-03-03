@@ -41,7 +41,6 @@ def main(cfg):
         logger=pl.loggers.WandbLogger(project="bit-llm"),
         log_every_n_steps=50,
         default_root_dir="~/logs",
-        enable_checkpointing=False,
         callbacks=[
             GenerationCallback(tokenizer=tokenizer),
         ]

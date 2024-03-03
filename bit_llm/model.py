@@ -11,28 +11,20 @@ from torch.nn import functional as F
 
 
 class BitLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, norm: bool = True):
+    def __init__(self, in_features: int, out_features: int):
         super().__init__()
         self.eps = 1e-5
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        # self.scale = nn.Parameter(torch.ones(()))
-        self.norm = norm
-        # self._register_load_state_dict_pre_hook(self._load_weights_hook)
 
     def forward(self, x):
         # return F.linear(x, self.weight)
         x = F.linear(x, self.get_quantized_weight())
-        return x * self.weight.abs().mean() # self.scale.abs()
-        # Re-scale the output to 8 bit
-        # scale = self.weight.size(1)
-        # Q_b = 2 ** (8 - 1)
-        # x = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
-        # return x
+        return x * self.weight.abs().mean()
 
     def get_quantized_weight(self):
         # Quantize the weights to -1, 0, 1
-        Wn = self.weight / (self.weight.abs().mean() + self.eps)
-        Wq = torch.round(Wn).clamp(-1.0, 1.0) + (Wn - Wn.detach())
+        Wq = self.weight / (self.weight.abs().mean() + self.eps)
+        Wq = torch.round(Wq) + (Wq - Wq.detach())
         return Wq
 
     @torch.no_grad()
@@ -60,12 +52,6 @@ class BitLinear(nn.Module):
         if len(Wq) % 5 != 0:
             Wq[n5:] = data[-1, None] // 3 ** powers[: len(Wq) % 5]
         return (Wq.view(self.weight.data.shape) % 3).to(self.weight.dtype) - 1.0
-
-    # def _load_weights_hook(self, state_dict, prefix, *args):
-    #     # This is a hook to load weights from the original weights format
-    #     # The original weights have `q_proj`, `k_proj`, `v_proj` and `o_proj` separately
-    #     if prefix + "scale" not in state_dict:
-    #         state_dict[prefix + "scale"] = state_dict[prefix + "weight"].detach().abs().mean()
 
 
 class LlamaAttention(nn.Module):
@@ -150,7 +136,7 @@ class Llama(LightningModule):
         num_layers: int,
         num_attention_heads: int,
         intermediate_size: int,
-        lr: float = 1e-4,
+        lr: float = 2e-5,
         vocab_size: int = 32000,
         max_sequence_length: int = 2048,
         should_init_weights: bool = True,
@@ -167,7 +153,7 @@ class Llama(LightningModule):
         )
         self.norm = LlamaNorm(hidden_dim)
         self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
-        self.lm_head = BitLinear(hidden_dim, vocab_size, norm=False)
+        self.lm_head = nn.Linear(hidden_dim, vocab_size)
 
         if should_init_weights:
             self.apply(_weight_init)
@@ -195,9 +181,9 @@ class Llama(LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.01)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.0)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.05, verbose=False
+            optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.03, verbose=False
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
 

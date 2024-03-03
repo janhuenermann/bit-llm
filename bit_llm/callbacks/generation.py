@@ -34,3 +34,7 @@ class GenerationCallback(pl.Callback):
         print("=======================")
 
         self.counter = 0
+
+        columns = ["prompt", "model"]
+        data = [[prompt, generated_text]]
+        pl_module.logger.log_text(key="samples", columns=columns, data=data)
