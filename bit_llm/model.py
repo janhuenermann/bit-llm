@@ -15,12 +15,14 @@ class BitLinear(nn.Module):
         super().__init__()
         self.eps = 1e-5
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        # self.scale = nn.Parameter(torch.ones(()))
         self.norm = norm
+        # self._register_load_state_dict_pre_hook(self._load_weights_hook)
 
     def forward(self, x):
         # return F.linear(x, self.weight)
         x = F.linear(x, self.get_quantized_weight())
-        return x * self.weight.abs().mean()
+        return x * self.weight.abs().mean() # self.scale.abs()
         # Re-scale the output to 8 bit
         # scale = self.weight.size(1)
         # Q_b = 2 ** (8 - 1)
@@ -58,6 +60,12 @@ class BitLinear(nn.Module):
         if len(Wq) % 5 != 0:
             Wq[n5:] = data[-1, None] // 3 ** powers[: len(Wq) % 5]
         return (Wq.view(self.weight.data.shape) % 3).to(self.weight.dtype) - 1.0
+
+    # def _load_weights_hook(self, state_dict, prefix, *args):
+    #     # This is a hook to load weights from the original weights format
+    #     # The original weights have `q_proj`, `k_proj`, `v_proj` and `o_proj` separately
+    #     if prefix + "scale" not in state_dict:
+    #         state_dict[prefix + "scale"] = state_dict[prefix + "weight"].detach().abs().mean()
 
 
 class LlamaAttention(nn.Module):
@@ -187,7 +195,7 @@ class Llama(LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.1)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.01)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.05, verbose=False
         )
