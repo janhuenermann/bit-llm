@@ -35,9 +35,9 @@ def main(cfg):
 
     trainer = pl.Trainer(
         accelerator="auto",
-        max_steps=1000,
+        max_steps=10_000,
         precision="bf16-true",
-        gradient_clip_val=5.0,
+        gradient_clip_val=1.0,
         logger=pl.loggers.WandbLogger(project="bit-llm"),
         log_every_n_steps=50,
         default_root_dir="~/logs",

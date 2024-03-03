@@ -18,12 +18,14 @@ class BitLinear(nn.Module):
         self.norm = norm
 
     def forward(self, x):
+        # return F.linear(x, self.weight)
         x = F.linear(x, self.get_quantized_weight())
+        return x * self.weight.abs().mean()
         # Re-scale the output to 8 bit
-        scale = self.weight.size(1)
-        Q_b = 2 ** (8 - 1)
-        x = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
-        return x
+        # scale = self.weight.size(1)
+        # Q_b = 2 ** (8 - 1)
+        # x = torch.clamp((x / scale) * Q_b, -Q_b, Q_b)
+        # return x
 
     def get_quantized_weight(self):
         # Quantize the weights to -1, 0, 1
@@ -112,7 +114,7 @@ class LlamaNorm(nn.Module):
     def forward(self, x):
         upcasted_x = x.float()
         upcasted_x = upcasted_x * torch.rsqrt(
-            upcasted_x.var(dim=-1, keepdim=True) + self.variance_epsilon
+            upcasted_x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
         )
         return self.weight * upcasted_x.to(x.dtype)
 
@@ -223,7 +225,7 @@ def _apply_rotary(q, k, rotary) -> Tuple[Tensor, Tensor]:
         k: keys Tensor [batch, sequence, n_heads, head_dim]
         rotary: rotary positional embedding Tensor [2, sequence, head_dim]
     """
-    cos, sin = rotary.unsqueeze(2).unbind(0)
+    sin, cos = rotary.unsqueeze(2).unbind(0)
     q_embed = (q * cos) + (_rotate_half(q) * sin)
     k_embed = (k * cos) + (_rotate_half(k) * sin)
     return q_embed, k_embed

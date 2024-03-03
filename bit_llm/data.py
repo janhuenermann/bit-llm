@@ -96,7 +96,7 @@ class DataModule(LightningDataModule):
     def __init__(self, tokenizer: LlamaTokenizerFast, batch_size: int):
         super().__init__()
         tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.model_max_length = 128
+        tokenizer.model_max_length = 512
         self.tokenizer = tokenizer
         self.batch_size = batch_size
 
