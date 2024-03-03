@@ -23,10 +23,12 @@ def main(cfg):
     model_name = "HuggingFaceTB/cosmo-1b"
     tokenizer = LlamaTokenizerFast.from_pretrained(model_name)
     base_model = LlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True)
+
     model = hydra.utils.instantiate(cfg.model, should_init_weights=False)
     model.load_state_dict(base_model.state_dict(), strict=True)
 
-    model.cuda()
+    model.embed_tokens.requires_grad_(False)
+    model.lm_head.requires_grad_(False)
 
     with io.BytesIO() as f:
         np.savez(f, **get_quantized_state_dict(model))

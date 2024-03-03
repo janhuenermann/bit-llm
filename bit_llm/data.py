@@ -33,7 +33,7 @@ def preprocess(sources: Sequence[str], targets: Sequence[str], tokenizer: LlamaT
         max_length=tokenizer.model_max_length,
         truncation=True,
     )
-    mask = outputs['offset_mapping'][:, :, 1] < torch.tensor([len(s) for s in sources]).unsqueeze(1)
+    mask = outputs['offset_mapping'][:, :, 1] < torch.as_tensor([len(s) for s in sources]).unsqueeze(1)
     labels = outputs["input_ids"].masked_fill(mask, IGNORE_INDEX)
     return dict(input_ids=outputs["input_ids"], labels=labels)
 

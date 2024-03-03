@@ -18,14 +18,13 @@ class BitLinear(nn.Module):
 
     def forward(self, x):
         # return F.linear(x, self.weight)
-        x = F.linear(x, self.get_quantized_weight())
-        return x * self.weight.abs().mean()
+        x = F.linear(x, self.quantize_weight())
+        return x * (self.weight.abs().mean() + self.eps)
 
-    def get_quantized_weight(self):
+    def quantize_weight(self):
         # Quantize the weights to -1, 0, 1
         Wq = self.weight / (self.weight.abs().mean() + self.eps)
-        Wq = torch.round(Wq).clamp(-1, 1) + (Wq - Wq.detach())
-        return Wq
+        return torch.round(Wq).clamp(-1, 1) + (Wq - Wq.detach())
 
     @torch.no_grad()
     def encode(self):
@@ -33,7 +32,7 @@ class BitLinear(nn.Module):
         Pack the quantized weights in 1.6 bit, i.e. 5 values per byte.
         """
         powers = 3 ** torch.arange(5, device=self.weight.device)
-        Wq = 1 + self.get_quantized_weight().detach().flatten()
+        Wq = 1 + self.quantize_weight().detach().flatten()
         n5 = len(Wq) - (len(Wq) % 5)
         data = torch.sum(Wq[:n5].reshape(-1, 5) * powers, dim=-1, dtype=torch.uint8)
         if len(Wq) % 5 != 0:
@@ -59,33 +58,19 @@ class LlamaAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
-        self.qkv_proj = BitLinear(hidden_dim, hidden_dim * 3)
+        self.q_proj = BitLinear(hidden_dim, hidden_dim)
+        self.k_proj = BitLinear(hidden_dim, hidden_dim)
+        self.v_proj = BitLinear(hidden_dim, hidden_dim)
         self.o_proj = BitLinear(hidden_dim, hidden_dim)
-        self._register_load_state_dict_pre_hook(self._load_weights_hook)
 
     def forward(self, x: Tensor, rotary: Tensor) -> Tensor:
-        q, k, v = self.qkv_proj(x).chunk(3, dim=-1)
-
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_heads, self.head_dim)
+        q = self.q_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
+        v = self.v_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
         q, k = _apply_rotary(q, k, rotary)
-
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-
         return self.o_proj(y.transpose(1, 2).flatten(-2))
-
-    def _load_weights_hook(self, state_dict, prefix, *args):
-        # This is a hook to load weights from the original weights format
-        # The original weights have `q_proj`, `k_proj`, `v_proj` and `o_proj` separately
-        if prefix + "q_proj.weight" in state_dict:
-            q_weight = state_dict.pop(prefix + "q_proj.weight")
-            k_weight = state_dict.pop(prefix + "k_proj.weight")
-            v_weight = state_dict.pop(prefix + "v_proj.weight")
-            state_dict[prefix + "qkv_proj.weight"] = torch.cat(
-                [q_weight, k_weight, v_weight], dim=0
-            )
 
 
 class LlamaMLP(nn.Module):
