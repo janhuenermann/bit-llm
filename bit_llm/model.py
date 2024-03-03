@@ -153,7 +153,7 @@ class Llama(LightningModule):
         )
         self.norm = LlamaNorm(hidden_dim)
         self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
-        self.lm_head = nn.Linear(hidden_dim, vocab_size)
+        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
 
         if should_init_weights:
             self.apply(_weight_init)
