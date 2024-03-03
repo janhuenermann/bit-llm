@@ -66,10 +66,10 @@ class SupervisedDataset(Dataset):
 
 
 class DataModule(LightningDataModule):
-    def __init__(self, tokenizer: LlamaTokenizerFast, batch_size: int):
+    def __init__(self, tokenizer: LlamaTokenizerFast, batch_size: int, chunk_size: int = 256):
         super().__init__()
         tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.model_max_length = 512
+        tokenizer.model_max_length = chunk_size
         self.tokenizer = tokenizer
         self.batch_size = batch_size
 

@@ -24,7 +24,7 @@ class BitLinear(nn.Module):
     def get_quantized_weight(self):
         # Quantize the weights to -1, 0, 1
         Wq = self.weight / (self.weight.abs().mean() + self.eps)
-        Wq = torch.round(Wq) + (Wq - Wq.detach())
+        Wq = torch.round(Wq).clamp(-1, 1) + (Wq - Wq.detach())
         return Wq
 
     @torch.no_grad()
@@ -136,7 +136,7 @@ class Llama(LightningModule):
         num_layers: int,
         num_attention_heads: int,
         intermediate_size: int,
-        lr: float = 2e-5,
+        lr: float = 5e-5,
         vocab_size: int = 32000,
         max_sequence_length: int = 2048,
         should_init_weights: bool = True,
