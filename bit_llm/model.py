@@ -17,7 +17,6 @@ class BitLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
 
     def forward(self, x):
-        # return F.linear(x, self.weight)
         x = F.linear(x, self.quantize_weight())
         return x * (self.weight.abs().mean() + self.eps)
 
@@ -45,6 +44,14 @@ class BitLinear(nn.Module):
         powers = 3 ** torch.arange(5, device=self.weight.device)
         Wq = (data[:, None] // powers).flatten()[:self.weight.data.numel()] % 3
         return Wq.view(self.weight.data.shape).to(self.weight.dtype) - 1.0
+
+
+class BitEmbedding(BitLinear):
+    def __init__(self, vocab_size: int, hidden_dim: int):
+        super().__init__(hidden_dim, vocab_size)
+
+    def forward(self, x):
+        return F.embedding(x, self.quantize_weight())
 
 
 class LlamaAttention(nn.Module):
@@ -131,8 +138,8 @@ class Llama(LightningModule):
             ]
         )
         self.norm = LlamaNorm(hidden_dim)
-        self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
-        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+        self.embed_tokens = BitEmbedding(vocab_size, hidden_dim)
+        self.lm_head = BitLinear(hidden_dim, vocab_size)
 
         if should_init_weights:
             self.apply(_weight_init)
@@ -230,7 +237,7 @@ def _compute_rotary(
 
 
 def _weight_init(module: nn.Module):
-    if isinstance(module, (BitLinear, nn.Embedding)):
+    if isinstance(module, (BitLinear, BitEmbedding)):
         nn.init.normal_(module.weight, std=0.02)
 
 
@@ -239,7 +246,7 @@ def get_quantized_state_dict(model: Llama):
     for n, m in model.named_modules():
         if isinstance(m, BitLinear):
             quantized_state_dict[n + ".weight"] = m.encode()
-        elif isinstance(m, nn.Embedding):
-            quantized_state_dict[n + ".weight"] = m.weight.data.detach().half()
+        elif isinstance(m, LlamaNorm):
+            quantized_state_dict[n + ".weight"] = m.weight.detach().clone().half()
     quantized_state_dict = {k: v.cpu().numpy() for k, v in quantized_state_dict.items()}
     return quantized_state_dict
