@@ -1,6 +1,6 @@
 import re
 from typing import Tuple
-import numpy as np
+import math
 
 import torch
 from lightning.pytorch import LightningModule
@@ -33,24 +33,18 @@ class BitLinear(nn.Module):
         """
         powers = 3 ** torch.arange(5, device=self.weight.device)
         Wq = 1 + self.quantize_weight().detach().flatten()
-        n5 = len(Wq) - (len(Wq) % 5)
-        data = torch.sum(Wq[:n5].reshape(-1, 5) * powers, dim=-1, dtype=torch.uint8)
         if len(Wq) % 5 != 0:
-            data = torch.cat([data, torch.sum(Wq[n5:] * powers[: len(Wq) % 5], dtype=torch.uint8).unsqueeze(0)])
-        return data
+            Wq = torch.cat((Wq, torch.zeros(5 - len(Wq) % 5, dtype=Wq.dtype, device=Wq.device)))
+        return torch.sum(Wq.reshape(-1, 5) * powers, dim=-1, dtype=torch.uint8)
 
     @torch.no_grad()
     def load_quantized(self, data):
         """
         Load the quantized weights from the packed data.
         """
-        powers = 3 ** torch.arange(5)
-        Wq = torch.zeros(self.weight.data.numel(), dtype=torch.uint8)
-        n5 = len(Wq) - (len(Wq) % 5)
-        Wq[:n5] = (data[:n5 // 5, None] // powers).flatten()
-        if len(Wq) % 5 != 0:
-            Wq[n5:] = data[-1, None] // 3 ** powers[: len(Wq) % 5]
-        return (Wq.view(self.weight.data.shape) % 3).to(self.weight.dtype) - 1.0
+        powers = 3 ** torch.arange(5, device=self.weight.device)
+        Wq = (data[:, None] // powers).flatten()[:self.weight.data.numel()] % 3
+        return Wq.view(self.weight.data.shape).to(self.weight.dtype) - 1.0
 
 
 class LlamaAttention(nn.Module):
