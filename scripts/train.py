@@ -10,7 +10,6 @@ import torch
 
 from bit_llm.data import DataModule
 from bit_llm.callbacks.generation import GenerationCallback
-from bit_llm.model import get_quantized_state_dict
 
 
 os.environ["CURL_CA_BUNDLE"] = ""
@@ -20,37 +19,43 @@ os.environ["CURL_CA_BUNDLE"] = ""
 def main(cfg):
     torch.set_float32_matmul_precision("high")
 
-    model_name = "HuggingFaceTB/cosmo-1b"
+    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
     tokenizer = LlamaTokenizerFast.from_pretrained(model_name)
     base_model = LlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True)
 
     model = hydra.utils.instantiate(cfg.model, should_init_weights=False)
     model.load_state_dict(base_model.state_dict(), strict=True)
 
-    model.embed_tokens.requires_grad_(False)
-    model.lm_head.requires_grad_(False)
+    model.half().eval().cuda()
 
-    with io.BytesIO() as f:
-        np.savez(f, **get_quantized_state_dict(model))
-        model_size_mb = f.tell() / (1000 ** 2)
-        print(f"Model size: {model_size_mb:.2f} MB")
+    prompt_ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Hello, how are you?"}], return_tensors="pt"
+    ).cuda()
 
-    trainer = pl.Trainer(
-        accelerator="auto",
-        max_steps=10_000,
-        precision="bf16-true",
-        gradient_clip_val=1.0,
-        logger=pl.loggers.WandbLogger(project="bit-llm"),
-        log_every_n_steps=50,
-        default_root_dir="~/logs",
-        callbacks=[
-            GenerationCallback(tokenizer=tokenizer),
-        ]
-    )
+    output_ids = model.generate(prompt_ids, max_len=50)
 
-    data_module = DataModule(tokenizer=tokenizer, batch_size=cfg.batch_size)
+    print(output_ids)
 
-    trainer.fit(model, data_module)
+    output = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    print(output)
+
+    # trainer = pl.Trainer(
+    #     accelerator="auto",
+    #     max_steps=10_000,
+    #     precision="bf16-true",
+    #     gradient_clip_val=1.0,
+    #     logger=pl.loggers.WandbLogger(project="bit-llm"),
+    #     log_every_n_steps=50,
+    #     default_root_dir="~/logs",
+    #     callbacks=[
+    #         GenerationCallback(tokenizer=tokenizer),
+    #     ],
+    # )
+
+    # data_module = DataModule(tokenizer=tokenizer, batch_size=cfg.batch_size)
+
+    # trainer.fit(model, data_module)
 
 
 if __name__ == "__main__":

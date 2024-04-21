@@ -1,91 +1,64 @@
 import re
 from typing import Tuple
-import math
+
 
 import torch
 from lightning.pytorch import LightningModule
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-# Adapted from https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
 
-
-class BitLinear(nn.Module):
+class Linear(nn.Module):
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
         self.eps = 1e-5
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
 
     def forward(self, x):
-        x = F.linear(x, self.quantize_weight())
-        return x * (self.weight.abs().mean() + self.eps)
-
-    def quantize_weight(self):
-        # Quantize the weights to -1, 0, 1
-        Wq = self.weight / (self.weight.abs().mean() + self.eps)
-        return torch.round(Wq).clamp(-1, 1) + (Wq - Wq.detach())
-
-    @torch.no_grad()
-    def encode(self):
-        """
-        Pack the quantized weights in 1.6 bit, i.e. 5 values per byte.
-        """
-        powers = 3 ** torch.arange(5, device=self.weight.device)
-        Wq = 1 + self.quantize_weight().detach().flatten()
-        if len(Wq) % 5 != 0:
-            Wq = torch.cat((Wq, torch.zeros(5 - len(Wq) % 5, dtype=Wq.dtype, device=Wq.device)))
-        return torch.sum(Wq.reshape(-1, 5) * powers, dim=-1, dtype=torch.uint8)
-
-    @torch.no_grad()
-    def load_quantized(self, data):
-        """
-        Load the quantized weights from the packed data.
-        """
-        powers = 3 ** torch.arange(5, device=self.weight.device)
-        Wq = (data[:, None] // powers).flatten()[:self.weight.data.numel()] % 3
-        return Wq.view(self.weight.data.shape).to(self.weight.dtype) - 1.0
+        return F.linear(x, self.weight)
 
 
-class BitEmbedding(BitLinear):
-    def __init__(self, vocab_size: int, hidden_dim: int):
-        super().__init__(hidden_dim, vocab_size)
-
-    def forward(self, x):
-        return F.embedding(x, self.quantize_weight())
-
-
-class LlamaAttention(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int):
+class Attention(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int, num_key_value_heads: int = 0):
         super().__init__()
+        num_key_value_heads = (
+            num_key_value_heads if num_key_value_heads > 0 else num_heads
+        )
         self.num_heads = num_heads
+        self.num_key_value_heads = num_key_value_heads
         self.head_dim = hidden_dim // num_heads
-        self.q_proj = BitLinear(hidden_dim, hidden_dim)
-        self.k_proj = BitLinear(hidden_dim, hidden_dim)
-        self.v_proj = BitLinear(hidden_dim, hidden_dim)
-        self.o_proj = BitLinear(hidden_dim, hidden_dim)
+        self.q_proj = Linear(hidden_dim, self.head_dim * num_heads)
+        self.k_proj = Linear(hidden_dim, self.head_dim * num_key_value_heads)
+        self.v_proj = Linear(hidden_dim, self.head_dim * num_key_value_heads)
+        self.o_proj = Linear(hidden_dim, hidden_dim)
 
     def forward(self, x: Tensor, rotary: Tensor) -> Tensor:
         q = self.q_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
-        k = self.k_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
-        v = self.v_proj(x).view(*x.shape[:-1], self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(*x.shape[:-1], self.num_key_value_heads, self.head_dim)
+        v = self.v_proj(x).view(*x.shape[:-1], self.num_key_value_heads, self.head_dim)
         q, k = _apply_rotary(q, k, rotary)
+
+        if self.num_key_value_heads != self.num_heads:
+            k = k.repeat_interleave(self.num_heads // self.num_key_value_heads, -2)
+            v = v.repeat_interleave(self.num_heads // self.num_key_value_heads, -2)
+
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return self.o_proj(y.transpose(1, 2).flatten(-2))
 
 
-class LlamaMLP(nn.Module):
+class Mlp(nn.Module):
     def __init__(self, hidden_dim: int, intermediate_size: int):
         super().__init__()
-        self.gate_proj = BitLinear(hidden_dim, intermediate_size)
-        self.up_proj = BitLinear(hidden_dim, intermediate_size)
-        self.down_proj = BitLinear(intermediate_size, hidden_dim)
+        self.gate_proj = Linear(hidden_dim, intermediate_size)
+        self.up_proj = Linear(hidden_dim, intermediate_size)
+        self.down_proj = Linear(intermediate_size, hidden_dim)
 
     def forward(self, x):
         return self.down_proj(F.silu(self.gate_proj(x), inplace=True) * self.up_proj(x))
 
 
-class LlamaNorm(nn.Module):
+class Norm(nn.Module):
     def __init__(self, hidden_size: int, eps=1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -99,15 +72,19 @@ class LlamaNorm(nn.Module):
         return self.weight * upcasted_x.to(x.dtype)
 
 
-class LlamaLayer(nn.Module):
+class Block(nn.Module):
     def __init__(
-        self, hidden_dim: int, num_attention_heads: int, intermediate_size: int
+        self,
+        hidden_dim: int,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
     ):
         super().__init__()
-        self.self_attn = LlamaAttention(hidden_dim, num_attention_heads)
-        self.mlp = LlamaMLP(hidden_dim, intermediate_size)
-        self.input_layernorm = LlamaNorm(hidden_dim)
-        self.post_attention_layernorm = LlamaNorm(hidden_dim)
+        self.self_attn = Attention(hidden_dim, num_attention_heads, num_key_value_heads)
+        self.mlp = Mlp(hidden_dim, intermediate_size)
+        self.input_layernorm = Norm(hidden_dim)
+        self.post_attention_layernorm = Norm(hidden_dim)
 
     def forward(self, x, rotary):
         x = x + self.self_attn(self.input_layernorm(x), rotary)
@@ -121,11 +98,13 @@ class Llama(LightningModule):
         hidden_dim: int,
         num_layers: int,
         num_attention_heads: int,
+        num_key_value_heads: int,
         intermediate_size: int,
         lr: float = 5e-5,
         vocab_size: int = 32000,
         max_sequence_length: int = 2048,
         should_init_weights: bool = True,
+        rope_theta: float = 10000.0,
     ):
         super().__init__()
 
@@ -133,13 +112,18 @@ class Llama(LightningModule):
 
         self.layers = nn.ModuleList(
             [
-                LlamaLayer(hidden_dim, num_attention_heads, intermediate_size)
+                Block(
+                    hidden_dim,
+                    intermediate_size,
+                    num_attention_heads,
+                    num_key_value_heads,
+                )
                 for _ in range(num_layers)
             ]
         )
-        self.norm = LlamaNorm(hidden_dim)
-        self.embed_tokens = BitEmbedding(vocab_size, hidden_dim)
-        self.lm_head = BitLinear(hidden_dim, vocab_size)
+        self.norm = Norm(hidden_dim)
+        self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
+        self.lm_head = Linear(hidden_dim, vocab_size)
 
         if should_init_weights:
             self.apply(_weight_init)
@@ -147,7 +131,11 @@ class Llama(LightningModule):
         self._register_load_state_dict_pre_hook(self._load_weights_hook)
         self.register_buffer(
             "rotary",
-            _compute_rotary(hidden_dim // num_attention_heads, max_sequence_length),
+            _compute_rotary(
+                dim=hidden_dim // num_attention_heads,
+                max_sequence_length=max_sequence_length,
+                base=rope_theta,
+            ),
             persistent=False,
         )
 
@@ -162,25 +150,43 @@ class Llama(LightningModule):
         x = self.embed_tokens(ids)
         x = self.forward(x)
         logits = self.lm_head(x[:, :-1])
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels[:, 1:].flatten(), ignore_index=-1)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)), labels[:, 1:].flatten(), ignore_index=-1
+        )
         self.log("loss", loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.0)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=self.lr, total_steps=self.trainer.max_steps, pct_start=0.03, verbose=False
+            optimizer,
+            max_lr=self.lr,
+            total_steps=self.trainer.max_steps,
+            pct_start=0.03,
+            verbose=False,
         )
-        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "frequency": 1,
+                "interval": "step",
+            },
+        }
 
     @torch.inference_mode()
     def generate(self, prompt, max_len=50):
+        assert (
+            prompt.ndim == 2
+        ), f"Expected 2D input, but got tensor of shape {prompt.shape}"
+
         ids = prompt
         for _ in range(max_len):
             x = self.embed_tokens(ids)
             x = self.forward(x)
             logits = self.lm_head(x[:, -1])
             ids = torch.cat([ids, logits.argmax(-1).unsqueeze(-1)], dim=-1)
+
         return ids
 
     def _load_weights_hook(self, state_dict, prefix, *args):
@@ -212,7 +218,7 @@ def _apply_rotary(q, k, rotary) -> Tuple[Tensor, Tensor]:
 
 
 def _compute_rotary(
-    dim: int, max_sequence_length: int = 2048, base: int = 10000, device=None
+    dim: int, max_sequence_length: int = 2048, base: float = 10000.0, device=None
 ):
     """
     Computes rotary embeddings for a given dimension and maximum sequence length.
@@ -237,16 +243,16 @@ def _compute_rotary(
 
 
 def _weight_init(module: nn.Module):
-    if isinstance(module, (BitLinear, BitEmbedding)):
+    if isinstance(module, Linear):
         nn.init.normal_(module.weight, std=0.02)
 
 
-def get_quantized_state_dict(model: Llama):
-    quantized_state_dict = {}
-    for n, m in model.named_modules():
-        if isinstance(m, BitLinear):
-            quantized_state_dict[n + ".weight"] = m.encode()
-        elif isinstance(m, LlamaNorm):
-            quantized_state_dict[n + ".weight"] = m.weight.detach().clone().half()
-    quantized_state_dict = {k: v.cpu().numpy() for k, v in quantized_state_dict.items()}
-    return quantized_state_dict
+# def get_quantized_state_dict(model: Llama):
+#     quantized_state_dict = {}
+#     for n, m in model.named_modules():
+#         if isinstance(m, Linear):
+#             quantized_state_dict[n + ".weight"] = m.encode()
+#         elif isinstance(m, Norm):
+#             quantized_state_dict[n + ".weight"] = m.weight.detach().clone().half()
+#     quantized_state_dict = {k: v.cpu().numpy() for k, v in quantized_state_dict.items()}
+#     return quantized_state_dict

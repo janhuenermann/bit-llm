@@ -1,4 +1,4 @@
 defaults:
-  - model: small
+  - model: llama3
 
-batch_size: 15
+batch_size: 2
